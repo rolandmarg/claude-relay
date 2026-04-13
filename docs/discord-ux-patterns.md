@@ -78,3 +78,33 @@ This gives instant visual feedback that the bot heard you, and a clear signal wh
 - [ ] **Tool progress messages** — show what Claude Code is doing
 - [ ] **Configurable delivery settings** (ackReaction, replyToMode, chunkMode)
 - [ ] **Thread auto-archive duration** as config
+- [ ] **Progressive message editing** — stream Claude Code response into a message, editing in real-time
+- [ ] **Skills as slash commands** — auto-register Claude Code skills as Discord slash commands with autocomplete
+- [ ] **Webhook mode** — run as webhook endpoint instead of gateway (better for hosted deploys)
+
+---
+
+## Additional Hermes Agent Patterns (Deep Dive)
+
+### Progressive Message Editing (Streaming UX)
+Instead of waiting for the full response and dumping it all at once, Hermes edits its reply message progressively as the LLM streams. Users see the answer building in real-time. Critical for long-running Claude Code sessions (30+ seconds) — without this, the user stares at a typing indicator wondering if something broke. Implementation: send an initial "thinking..." message, then `message.edit()` as chunks arrive, finally replace with the complete response.
+
+### Skills → Slash Commands
+Every installed skill auto-registers as a native Discord slash command with autocomplete (up to 75, Discord's limit). Users type `/` and see available skills. For claude-relay this could mean: `/deploy-image-models`, `/vast-infra`, `/edit-bot-characters` etc. appearing directly in Discord's command palette. Zero-config discovery.
+
+### Multi-Instance Profiles
+Run multiple isolated Hermes instances from one installation. Each profile has separate config, memory, skills, and gateway. Maps well to claude-relay's per-channel config — each channel is effectively a different "profile" with its own cwd, system prompt, and tool restrictions.
+
+### Voice Channel Integration
+Join Discord voice channels, transcribe speech with Whisper (local/Groq/OpenAI), run through agent pipeline, respond with TTS (Edge TTS or ElevenLabs). Includes hallucination filtering (26 known Whisper phantom phrases). Wild for a coding agent but compelling for hands-free operation.
+
+### Webhook Mode
+v0.6.0 added webhook support as alternative to gateway polling. Better for production/scalable deployments. The bot receives events via HTTP POST instead of maintaining a WebSocket connection.
+
+### Error Recovery Patterns
+- Deleted reply target → silently retry without the reply-reference (don't crash).
+- System messages (thread rename, pin) → skip reply-to, send as plain message.
+- Rate limits → queue and retry with backoff.
+
+### Interactive Components
+Discord buttons for model selection — users click buttons inline instead of typing. Could be used for: choosing which Claude Code mode to run in, approving/denying tool permissions, selecting which channel config to apply.
