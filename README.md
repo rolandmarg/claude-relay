@@ -15,6 +15,7 @@ Discord ↔ Claude Code session bridge. Each Discord thread becomes an independe
 - Sessions idle-timeout after 1 hour, resume automatically on next message
 - Cross-thread awareness via shared `relay-notes/` directory
 - Periodic checkpoint injections prevent drift and forgotten tasks
+- Every 5 minutes, sweeps channels for unanswered messages and posts progress on active sessions
 
 ## Configuration
 
@@ -27,3 +28,4 @@ Environment variables:
 | `RELAY_IDLE_TIMEOUT` | No | `3600000` | Session idle timeout in ms (default: 1 hour) |
 | `RELAY_CHECKPOINT_INTERVAL` | No | `10` | Turns between checkpoint injections |
 | `RELAY_NOTES_DIR` | No | `relay-notes` | Directory for cross-thread shared findings |
+| `RELAY_SWEEP_INTERVAL` | No | `300000` | Channel sweep interval in ms (default: 5 min) |

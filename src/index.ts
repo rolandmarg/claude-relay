@@ -1,4 +1,11 @@
-import { Client, GatewayIntentBits, type ThreadChannel } from "discord.js";
+import {
+  ChannelType,
+  Client,
+  GatewayIntentBits,
+  type Message,
+  type TextChannel,
+  type ThreadChannel,
+} from "discord.js";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { SessionManager, type SessionEntry } from "./sessions.js";
 import { splitMessage } from "./split.js";
@@ -16,6 +23,7 @@ const PROJECT_ROOT = process.env.RELAY_CWD ?? process.cwd();
 const IDLE_TIMEOUT = Number(process.env.RELAY_IDLE_TIMEOUT) || 3_600_000;
 const CHECKPOINT_INTERVAL = Number(process.env.RELAY_CHECKPOINT_INTERVAL) || 10;
 const NOTES_DIR = process.env.RELAY_NOTES_DIR ?? "relay-notes";
+const SWEEP_INTERVAL = Number(process.env.RELAY_SWEEP_INTERVAL) || 5 * 60_000;
 const SESSIONS_FILE =
   process.env.RELAY_SESSIONS_FILE ??
   join(new URL("..", import.meta.url).pathname, "relay-sessions.json");
@@ -68,6 +76,9 @@ const sessions = await SessionManager.load(SESSIONS_FILE, {
   sessionsFile: SESSIONS_FILE,
 });
 
+// Track threads with in-flight queries (for sweep status reporting)
+const busyThreads = new Set<string>();
+
 // --- Core function ---
 
 async function sendToSession(
@@ -97,6 +108,7 @@ async function sendToSession(
     `turn=${entry.turnCount}`,
   );
 
+  busyThreads.add(threadId);
   try {
     let resultText = "";
     let sessionId = "";
@@ -147,6 +159,8 @@ async function sendToSession(
     log("SESSION_ERROR", threadId, msg);
     await thread.send(`Error: ${msg}`).catch(console.error);
     sessions.markInactive(threadId);
+  } finally {
+    busyThreads.delete(threadId);
   }
 }
 
@@ -351,10 +365,129 @@ client.on("messageCreate", async (message) => {
   }
 });
 
+// --- Channel sweep (every 5 minutes) ---
+
+async function sweep() {
+  log("SWEEP_START", "*");
+
+  for (const guild of client.guilds.cache.values()) {
+    const channels = guild.channels.cache.filter(
+      (ch) => ch.type === ChannelType.GuildText,
+    );
+
+    for (const [, channel] of channels) {
+      const textChannel = channel as TextChannel;
+      let messages: Message[];
+      try {
+        const fetched = await textChannel.messages.fetch({ limit: 50 });
+        messages = [...fetched.values()];
+      } catch {
+        continue; // no permission or other issue
+      }
+
+      const channelName = textChannel.name;
+      const channelDescription = textChannel.topic ?? "";
+
+      for (const msg of messages) {
+        // Skip bot messages
+        if (msg.author.bot) continue;
+        // Skip messages that already have a thread
+        if (msg.hasThread) continue;
+        // Skip messages older than 30 minutes (don't resurrect ancient messages)
+        if (Date.now() - msg.createdTimestamp > 30 * 60_000) continue;
+
+        log("SWEEP_FOUND", msg.id, `#${channelName}: "${msg.content.slice(0, 60)}"`);
+
+        // Create thread and start session
+        const threadName = msg.content.slice(0, 90) || `Session ${new Date().toISOString().slice(0, 16)}`;
+
+        enqueue(msg.id, async () => {
+          try {
+            const thread = await msg.startThread({
+              name: threadName,
+              autoArchiveDuration: 1440,
+            });
+            const threadId = thread.id;
+            log("SESSION_START", threadId, `${channelName} (sweep)`);
+
+            busyThreads.add(threadId);
+            try {
+              let resultText = "";
+              let sessionId = "";
+
+              const stream = query({
+                prompt: msg.content,
+                options: {
+                  cwd: PROJECT_ROOT,
+                  permissionMode: "default",
+                  systemPrompt: {
+                    type: "preset" as const,
+                    preset: "claude_code" as const,
+                    append: sessionPrompt(channelName, channelDescription, thread.name),
+                  },
+                },
+              });
+
+              for await (const m of stream) {
+                if (m.type === "result") {
+                  sessionId = m.session_id;
+                  resultText = m.subtype === "success"
+                    ? m.result
+                    : (m.errors?.join("\n") || "Session ended with an error.");
+                }
+              }
+
+              sessions.register(threadId, sessionId, channelName, channelDescription);
+
+              if (resultText) {
+                for (const chunk of splitMessage(resultText)) {
+                  await thread.send(chunk);
+                }
+              }
+            } finally {
+              busyThreads.delete(threadId);
+            }
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            log("SESSION_ERROR", msg.id, errMsg);
+          }
+        });
+      }
+
+      // Check active threads for in-progress work — post status updates
+      let activeThreads;
+      try {
+        activeThreads = await textChannel.threads.fetchActive();
+      } catch {
+        continue;
+      }
+
+      for (const [threadId, thread] of activeThreads.threads) {
+        if (!busyThreads.has(threadId)) continue;
+
+        // This thread has a query in flight — post a status update
+        const entry = sessions.get(threadId);
+        if (!entry) continue;
+
+        const elapsed = Math.round((Date.now() - entry.lastActivity) / 1000);
+        log("SWEEP_BUSY", threadId, `active for ${elapsed}s`);
+        await thread
+          .send(`_Still working... (${elapsed}s elapsed, turn ${entry.turnCount})_`)
+          .catch(console.error);
+      }
+    }
+  }
+
+  log("SWEEP_DONE", "*");
+}
+
+let sweepTimer: Timer;
+
 // --- Graceful shutdown ---
 
 async function shutdown() {
   console.log("Shutting down...");
+  clearInterval(sweepTimer);
   await sessions.save();
   client.destroy();
   process.exit(0);
@@ -367,3 +500,7 @@ process.on("SIGTERM", shutdown);
 
 await client.login(DISCORD_TOKEN);
 console.log(`claude-relay online as ${client.user?.tag}`);
+
+// Start periodic channel sweep
+sweepTimer = setInterval(() => sweep().catch(console.error), SWEEP_INTERVAL);
+console.log(`Channel sweep every ${SWEEP_INTERVAL / 1000}s`);
