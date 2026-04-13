@@ -54,7 +54,9 @@ export function sessionPrompt(
 
   lines.push(
     "",
-    `When you produce notable findings, write them to ${notesDir}/${channelName}/.`,
+    "Your response text is sent directly to the Discord thread as the reply. Always answer the user's question in your response — don't just reference files you wrote.",
+    "",
+    `If you produce notable findings worth persisting across sessions, also write them to ${notesDir}/${channelName}/.`,
     `Before starting work, scan ${notesDir}/ for relevant context from other channels.`,
   );
 
