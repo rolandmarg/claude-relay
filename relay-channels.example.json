@@ -1,0 +1,21 @@
+{
+  "defaults": {
+    "cwd": "/var/home/kira/sf-human",
+    "permissionMode": "default"
+  },
+  "channels": {
+    "research-models": {
+      "systemPrompt": "Focus on image generation model research and comparison.",
+      "files": ["docs/wiki/image-models.md", "data/presets.json"]
+    },
+    "research-harnesses": {
+      "systemPrompt": "Focus on GPU provisioning and harness infrastructure.",
+      "files": ["src/gpu/provision.ts", "src/gpu/workflow.ts"]
+    },
+    "research-civitai-images": {
+      "cwd": "/var/home/kira/civitai-research",
+      "systemPrompt": "Research CivitAI workflows, models, and generation techniques.",
+      "allowedTools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "Bash"]
+    }
+  }
+}
