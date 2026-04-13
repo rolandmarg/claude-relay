@@ -2,7 +2,14 @@ import { Client, GatewayIntentBits, type TextChannel, type ThreadChannel } from 
 import { loadConfig } from "./config.js";
 import { SessionManager } from "./sessions.js";
 import { channelTopic, errMsg, log } from "./prompts.js";
-import { startSession, sendToSession, setupIdleHandler, sweep, activeChannels } from "./relay.js";
+import {
+  startSession,
+  sendToSession,
+  setupIdleHandler,
+  sweep,
+  activeChannels,
+  busyThreads,
+} from "./relay.js";
 
 const config = await loadConfig();
 
@@ -24,6 +31,11 @@ const client = new Client({
 
 setupIdleHandler(config, sessions, () => client);
 
+// --- Drain state ---
+
+let draining = false;
+const DRAIN_TIMEOUT = Number(process.env.RELAY_DRAIN_TIMEOUT) || 60_000;
+
 // Per-thread message queue
 const messageQueues = new Map<string, Promise<void>>();
 
@@ -37,6 +49,11 @@ function enqueue(id: string, fn: () => Promise<void>) {
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+
+  if (draining) {
+    await message.react("⏳").catch(console.error);
+    return;
+  }
 
   if (message.channel.isThread()) {
     const thread = message.channel as ThreadChannel;
@@ -84,15 +101,39 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-// Graceful shutdown
+// --- Graceful shutdown with drain ---
+
 const sweepTimer = setInterval(
   () => sweep(config, sessions, client, enqueue).catch(console.error),
   config.sweepInterval,
 );
 
 async function shutdown() {
-  console.log("Shutting down...");
+  if (draining) return; // already shutting down
+  draining = true;
   clearInterval(sweepTimer);
+
+  const active = busyThreads.size;
+  if (active > 0) {
+    console.log(`Draining ${active} active session(s)... (timeout: ${DRAIN_TIMEOUT / 1000}s)`);
+
+    const deadline = Date.now() + DRAIN_TIMEOUT;
+    while (busyThreads.size > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (busyThreads.size > 0) {
+        console.log(`  ${busyThreads.size} session(s) still active...`);
+      }
+    }
+
+    if (busyThreads.size > 0) {
+      console.log(`Drain timeout — ${busyThreads.size} session(s) interrupted`);
+    } else {
+      console.log("All sessions drained cleanly");
+    }
+  } else {
+    console.log("No active sessions — shutting down immediately");
+  }
+
   await sessions.save();
   client.destroy();
   process.exit(0);
@@ -100,6 +141,8 @@ async function shutdown() {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+// --- Boot ---
 
 await client.login(config.discordToken);
 console.log(`claude-relay online as ${client.user?.tag}`);
