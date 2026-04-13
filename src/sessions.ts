@@ -1,11 +1,14 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
+export type ThreadStatus = "active" | "idle" | "resolved" | "archived";
+
 export interface SessionEntry {
   sessionId: string;
   channelName: string;
   channelDescription: string;
   active: boolean;
+  status: ThreadStatus;
   turnCount: number;
   turnsSinceCheckpoint: number;
   lastActivity: number;
@@ -41,6 +44,7 @@ export class SessionManager {
       channelName,
       channelDescription,
       active: true,
+      status: "active",
       turnCount: 0,
       turnsSinceCheckpoint: 0,
       lastActivity: Date.now(),
@@ -78,6 +82,7 @@ export class SessionManager {
     const entry = this.sessions.get(threadId);
     if (!entry) return;
     entry.active = false;
+    entry.status = "idle";
     const timer = this.timers.get(threadId);
     if (timer) {
       clearTimeout(timer);
@@ -86,11 +91,25 @@ export class SessionManager {
     this.save().catch(console.error);
   }
 
+  setStatus(threadId: string, status: ThreadStatus) {
+    const entry = this.sessions.get(threadId);
+    if (!entry) return;
+    entry.status = status;
+    if (status === "active") entry.active = true;
+    if (status === "archived" || status === "resolved") entry.active = false;
+    this.save().catch(console.error);
+  }
+
+  getByStatus(status: ThreadStatus): [string, SessionEntry][] {
+    return [...this.sessions.entries()].filter(([, e]) => e.status === status);
+  }
+
   updateSessionId(threadId: string, sessionId: string) {
     const entry = this.sessions.get(threadId);
     if (!entry) return;
     entry.sessionId = sessionId;
     entry.active = true;
+    entry.status = "active";
     entry.lastActivity = Date.now();
     this.resetIdleTimer(threadId);
     this.save().catch(console.error);
@@ -131,6 +150,7 @@ export class SessionManager {
       for (const [threadId, entry] of Object.entries(data)) {
         // All restored sessions are inactive — subprocess died on restart
         entry.active = false;
+        if (entry.status === "active") entry.status = "idle";
         manager.sessions.set(threadId, entry);
       }
     } catch {
