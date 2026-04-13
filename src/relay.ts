@@ -1,4 +1,4 @@
-import { ChannelType, type TextChannel, type ThreadChannel } from "discord.js";
+import { ChannelType, type Message, type TextChannel, type ThreadChannel } from "discord.js";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SessionManager, SessionEntry } from "./sessions.js";
 import type { Config, ChannelConfig } from "./config.js";
@@ -14,10 +14,20 @@ import {
 
 // --- Helpers ---
 
-async function sendChunks(thread: ThreadChannel, text: string) {
-  for (const chunk of splitMessage(text)) {
-    await thread.send(chunk);
+async function sendChunks(thread: ThreadChannel, text: string, replyTo?: Message) {
+  const chunks = splitMessage(text);
+  for (let i = 0; i < chunks.length; i++) {
+    if (i === 0 && replyTo) {
+      await replyTo.reply(chunks[i]).catch(() => thread.send(chunks[i]));
+    } else {
+      await thread.send(chunks[i]);
+    }
   }
+}
+
+function startTyping(thread: ThreadChannel): Timer {
+  thread.sendTyping().catch(() => {});
+  return setInterval(() => thread.sendTyping().catch(() => {}), 8_000);
 }
 
 async function drainStream(
@@ -63,12 +73,14 @@ export async function startSession(
     channelName: string;
     channelDescription: string;
     thread: ThreadChannel;
+    replyTo?: Message;
   },
-) {
+): Promise<boolean> {
   const threadId = opts.thread.id;
   const channelConfig = resolveChannelConfig(config, opts.channelName);
   log("SESSION_START", threadId, opts.channelName);
 
+  const typingTimer = startTyping(opts.thread);
   busyThreads.add(threadId);
   try {
     const { resultText, sessionId } = await drainStream(
@@ -92,11 +104,14 @@ export async function startSession(
     );
 
     sessions.register(threadId, sessionId, opts.channelName, opts.channelDescription);
-    if (resultText) await sendChunks(opts.thread, resultText);
+    if (resultText) await sendChunks(opts.thread, resultText, opts.replyTo);
+    return true;
   } catch (err) {
     log("SESSION_ERROR", threadId, errMsg(err));
     await opts.thread.send(`Error: ${errMsg(err)}`).catch(console.error);
+    return false;
   } finally {
+    clearInterval(typingTimer);
     busyThreads.delete(threadId);
   }
 }
@@ -107,9 +122,10 @@ export async function sendToSession(
   threadId: string,
   prompt: string,
   thread: ThreadChannel,
-) {
+  replyTo?: Message,
+): Promise<boolean> {
   const entry = sessions.get(threadId);
-  if (!entry) return;
+  if (!entry) return false;
 
   const channelConfig = resolveChannelConfig(config, entry.channelName);
 
@@ -126,6 +142,7 @@ export async function sendToSession(
 
   log("SESSION_MESSAGE", threadId, `turn=${entry.turnCount}`);
 
+  const typingTimer = startTyping(thread);
   busyThreads.add(threadId);
   try {
     const { resultText, sessionId } = await drainStream(
@@ -153,12 +170,15 @@ export async function sendToSession(
     );
 
     sessions.updateSessionId(threadId, sessionId);
-    if (resultText) await sendChunks(thread, resultText);
+    if (resultText) await sendChunks(thread, resultText, replyTo);
+    return true;
   } catch (err) {
     log("SESSION_ERROR", threadId, errMsg(err));
     await thread.send(`Error: ${errMsg(err)}`).catch(console.error);
     sessions.markInactive(threadId);
+    return false;
   } finally {
+    clearInterval(typingTimer);
     busyThreads.delete(threadId);
   }
 }

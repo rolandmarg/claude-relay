@@ -1,4 +1,4 @@
-const LIMIT = 2000;
+const LIMIT = 1900;
 
 export function splitMessage(text: string): string[] {
   if (text.length <= LIMIT) return [text];

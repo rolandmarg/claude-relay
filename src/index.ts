@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, type TextChannel, type ThreadChannel } from "discord.js";
+import { Client, GatewayIntentBits, type Message, type TextChannel, type ThreadChannel } from "discord.js";
 import { loadConfig } from "./config.js";
 import { SessionManager } from "./sessions.js";
 import { channelTopic, errMsg, log } from "./prompts.js";
@@ -31,6 +31,17 @@ const client = new Client({
 
 setupIdleHandler(config, sessions, () => client);
 
+// --- Ack emoji helpers ---
+
+async function ack(message: Message) {
+  await message.react("👀").catch(console.error);
+}
+
+async function ackDone(message: Message, success: boolean) {
+  await message.reactions.cache.get("👀")?.users.remove(client.user?.id).catch(() => {});
+  await message.react(success ? "✅" : "❌").catch(console.error);
+}
+
 // --- Drain state ---
 
 let draining = false;
@@ -59,32 +70,39 @@ client.on("messageCreate", async (message) => {
     const thread = message.channel as ThreadChannel;
     const threadId = thread.id;
 
+    await ack(message);
+
     enqueue(threadId, async () => {
+      let success: boolean;
       const entry = sessions.get(threadId);
       if (entry) {
-        await sendToSession(config, sessions, threadId, message.content, thread);
+        success = await sendToSession(config, sessions, threadId, message.content, thread, message);
       } else {
         const parent = thread.parent;
-        await startSession(config, sessions, {
+        success = await startSession(config, sessions, {
           prompt: message.content,
           channelName: parent?.name ?? "unknown",
           channelDescription: channelTopic(parent),
           thread,
+          replyTo: message,
         });
       }
+      await ackDone(message, success);
     });
   } else {
     const channel = message.channel as TextChannel;
     activeChannels.add(channel.id);
 
+    await ack(message);
+
     enqueue(message.id, async () => {
-      await message.react("🔄").catch(console.error);
+      let success = false;
       try {
         const thread = await message.startThread({
           name: message.content.slice(0, 90) || `Session ${new Date().toISOString().slice(0, 16)}`,
           autoArchiveDuration: 1440,
         });
-        await startSession(config, sessions, {
+        success = await startSession(config, sessions, {
           prompt: message.content,
           channelName: channel.name,
           channelDescription: channelTopic(channel),
@@ -93,10 +111,7 @@ client.on("messageCreate", async (message) => {
       } catch (err) {
         log("SESSION_ERROR", message.id, errMsg(err));
       }
-      await message.reactions
-        .resolve("🔄")
-        ?.users.remove(client.user?.id)
-        .catch(console.error);
+      await ackDone(message, success);
     });
   }
 });
@@ -109,7 +124,7 @@ const sweepTimer = setInterval(
 );
 
 async function shutdown() {
-  if (draining) return; // already shutting down
+  if (draining) return;
   draining = true;
   clearInterval(sweepTimer);
 
