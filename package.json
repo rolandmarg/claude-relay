@@ -1,0 +1,16 @@
+{
+  "name": "claude-relay",
+  "version": "0.0.1",
+  "description": "Discord ↔ Claude Code session bridge",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest",
+    "discord.js": "^14.18.0"
+  }
+}
