@@ -70,6 +70,7 @@ This gives instant visual feedback that the bot heard you, and a clear signal wh
 - [ ] **1900-char split limit** — buffer under Discord max
 
 ### Priority 2 — Should have
+- [ ] **Thread hygiene during sweep** — LLM-driven thread rename + archive (see below)
 - [ ] **Channel pairing** — explicit opt-in via terminal command
 - [ ] **Access.json gating** — re-read on every message
 - [ ] **Per-user session isolation** in shared channels (future, when multi-user)
@@ -81,6 +82,67 @@ This gives instant visual feedback that the bot heard you, and a clear signal wh
 - [ ] **Progressive message editing** — stream Claude Code response into a message, editing in real-time
 - [ ] **Skills as slash commands** — auto-register Claude Code skills as Discord slash commands with autocomplete
 - [ ] **Webhook mode** — run as webhook endpoint instead of gateway (better for hosted deploys)
+
+---
+
+---
+
+## Thread Hygiene (Sweep Feature)
+
+Problem: channels accumulate clutter fast. Threads with URL-based names, generic "hey check this"
+titles, resolved conversations still visible. After a day of active research, the channel sidebar
+is a wall of noise.
+
+### During each sweep, the bot should:
+
+**1. Rename stale/generic threads**
+- Fetch the thread's message history (first message + last few messages)
+- Ask an LLM (cheap/fast model like Haiku) to judge the current name:
+  - Is it a raw URL? → rename to a descriptive summary
+  - Is it too generic ("hey", "check this", "question")? → rename based on actual content
+  - Is it stale but the name still fits? → leave it
+- Thread name limit: 100 chars. LLM should produce ≤80 chars.
+- Only rename threads the bot owns (created via startThread).
+
+**2. Archive/close resolved threads**
+- For threads with no activity in X hours (configurable, default: 24h):
+  - Fetch last few messages
+  - Ask LLM: "Is this conversation resolved, or is there open work?"
+  - If resolved → archive the thread (thread.setArchived(true))
+  - If open work → leave it, maybe post a reminder: "This thread has open items"
+- For threads with no messages at all (failed session start) → archive immediately.
+
+**3. What NOT to do**
+- Don't delete threads — archive only (recoverable)
+- Don't rename threads mid-conversation (only during sweep when idle)
+- Don't archive threads with active sessions (check busyThreads)
+- Don't burn expensive models on thread naming — Haiku is fine
+
+### LLM prompt for thread triage
+
+```
+You are triaging Discord threads in a research channel. For each thread, decide:
+
+Thread: "${threadName}"
+Channel: #${channelName}
+First message: "${firstMessage}"
+Last message: "${lastMessage}"  
+Last activity: ${hoursAgo} hours ago
+Message count: ${messageCount}
+
+Respond with JSON:
+{
+  "action": "keep" | "rename" | "archive",
+  "newName": "short descriptive name (if rename, max 80 chars)",
+  "reason": "one sentence why"
+}
+```
+
+### Cost control
+- Use the cheapest model available (Haiku, or even a local model via Ollama)
+- Batch threads: send multiple threads in one prompt
+- Cache decisions: don't re-evaluate threads that haven't changed since last sweep
+- Rate limit: max 10 thread operations per sweep cycle
 
 ---
 
