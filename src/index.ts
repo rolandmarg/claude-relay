@@ -2,7 +2,6 @@ import {
   ChannelType,
   Client,
   GatewayIntentBits,
-  type Message,
   type TextChannel,
   type ThreadChannel,
 } from "discord.js";
@@ -37,12 +36,14 @@ function sessionPrompt(
 ): string {
   return [
     `You are responding to a message from Discord channel #${channelName}.`,
-    `Channel description: ${channelDescription}`,
+    channelDescription ? `Channel description: ${channelDescription}` : "",
     `Thread: ${threadName}`,
     "",
     `When you produce notable findings, write them to ${NOTES_DIR}/${channelName}/.`,
     `Before starting work, scan ${NOTES_DIR}/ for relevant context from other channels.`,
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 const CHECKPOINT_PROMPT = `[CHECKPOINT] Review your current state:
@@ -59,11 +60,56 @@ const TEARDOWN_PROMPT = `[SESSION ENDING] This session is going idle. Before shu
 
 // --- Logging ---
 
-function log(event: string, threadId: string, detail?: string) {
+type LogEvent =
+  | "SESSION_START"
+  | "SESSION_RESUME"
+  | "SESSION_MESSAGE"
+  | "SESSION_CHECKPOINT"
+  | "SESSION_TEARDOWN"
+  | "SESSION_ERROR"
+  | "SWEEP_START"
+  | "SWEEP_FOUND"
+  | "SWEEP_BUSY"
+  | "SWEEP_DONE";
+
+function log(event: LogEvent, threadId: string, detail?: string) {
   const ts = new Date().toISOString();
   const parts = [ts, event, threadId];
   if (detail) parts.push(detail);
   console.log(parts.join(" | "));
+}
+
+// --- Helpers ---
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function channelTopic(ch: { topic?: string | null } | null | undefined): string {
+  return ch?.topic ?? "";
+}
+
+async function sendChunks(thread: ThreadChannel, text: string) {
+  for (const chunk of splitMessage(text)) {
+    await thread.send(chunk);
+  }
+}
+
+async function drainStream(
+  stream: ReturnType<typeof query>,
+): Promise<{ resultText: string; sessionId: string }> {
+  let resultText = "";
+  let sessionId = "";
+  for await (const message of stream) {
+    if (message.type === "result") {
+      sessionId = message.session_id;
+      resultText =
+        message.subtype === "success"
+          ? message.result
+          : (message.errors?.join("\n") || "Session ended with an error.");
+    }
+  }
+  return { resultText, sessionId };
 }
 
 // --- Session Manager ---
@@ -76,10 +122,58 @@ const sessions = await SessionManager.load(SESSIONS_FILE, {
   sessionsFile: SESSIONS_FILE,
 });
 
-// Track threads with in-flight queries (for sweep status reporting)
 const busyThreads = new Set<string>();
 
-// --- Core function ---
+// Track channels with recent activity so sweep can skip quiet ones
+const activeChannels = new Set<string>();
+
+// --- Core functions ---
+
+async function startSession(opts: {
+  prompt: string;
+  channelName: string;
+  channelDescription: string;
+  thread: ThreadChannel;
+}) {
+  const threadId = opts.thread.id;
+  log("SESSION_START", threadId, opts.channelName);
+
+  busyThreads.add(threadId);
+  try {
+    const { resultText, sessionId } = await drainStream(
+      query({
+        prompt: opts.prompt,
+        options: {
+          cwd: PROJECT_ROOT,
+          permissionMode: "default",
+          systemPrompt: {
+            type: "preset" as const,
+            preset: "claude_code" as const,
+            append: sessionPrompt(
+              opts.channelName,
+              opts.channelDescription,
+              opts.thread.name,
+            ),
+          },
+        },
+      }),
+    );
+
+    sessions.register(
+      threadId,
+      sessionId,
+      opts.channelName,
+      opts.channelDescription,
+    );
+
+    if (resultText) await sendChunks(opts.thread, resultText);
+  } catch (err) {
+    log("SESSION_ERROR", threadId, errMsg(err));
+    await opts.thread.send(`Error: ${errMsg(err)}`).catch(console.error);
+  } finally {
+    busyThreads.delete(threadId);
+  }
+}
 
 async function sendToSession(
   threadId: string,
@@ -89,9 +183,7 @@ async function sendToSession(
   const entry = sessions.get(threadId);
   if (!entry) return;
 
-  if (!entry.active) {
-    log("SESSION_RESUME", threadId);
-  }
+  if (!entry.active) log("SESSION_RESUME", threadId);
 
   sessions.incrementTurn(threadId);
 
@@ -102,62 +194,38 @@ async function sendToSession(
     sessions.resetCheckpoint(threadId);
   }
 
-  log(
-    "SESSION_MESSAGE",
-    threadId,
-    `turn=${entry.turnCount}`,
-  );
+  log("SESSION_MESSAGE", threadId, `turn=${entry.turnCount}`);
 
   busyThreads.add(threadId);
   try {
-    let resultText = "";
-    let sessionId = "";
-
-    const stream = query({
-      prompt: effectivePrompt,
-      options: {
-        cwd: PROJECT_ROOT,
-        permissionMode: "default",
-        ...(entry.active
-          ? { resume: entry.sessionId }
-          : {
-              systemPrompt: {
-                type: "preset" as const,
-                preset: "claude_code" as const,
-                append: sessionPrompt(
-                  entry.channelName,
-                  entry.channelDescription,
-                  thread.name,
-                ),
-              },
-            }),
-      },
-    });
-
-    for await (const message of stream) {
-      if (message.type === "result") {
-        sessionId = message.session_id;
-        if (message.subtype === "success") {
-          resultText = message.result;
-        } else {
-          resultText =
-            message.errors?.join("\n") || "Session ended with an error.";
-        }
-      }
-    }
+    const { resultText, sessionId } = await drainStream(
+      query({
+        prompt: effectivePrompt,
+        options: {
+          cwd: PROJECT_ROOT,
+          permissionMode: "default",
+          ...(entry.active
+            ? { resume: entry.sessionId }
+            : {
+                systemPrompt: {
+                  type: "preset" as const,
+                  preset: "claude_code" as const,
+                  append: sessionPrompt(
+                    entry.channelName,
+                    entry.channelDescription,
+                    thread.name,
+                  ),
+                },
+              }),
+        },
+      }),
+    );
 
     sessions.updateSessionId(threadId, sessionId);
-
-    if (resultText) {
-      const chunks = splitMessage(resultText);
-      for (const chunk of chunks) {
-        await thread.send(chunk);
-      }
-    }
+    if (resultText) await sendChunks(thread, resultText);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log("SESSION_ERROR", threadId, msg);
-    await thread.send(`Error: ${msg}`).catch(console.error);
+    log("SESSION_ERROR", threadId, errMsg(err));
+    await thread.send(`Error: ${errMsg(err)}`).catch(console.error);
     sessions.markInactive(threadId);
   } finally {
     busyThreads.delete(threadId);
@@ -174,32 +242,20 @@ sessions.setIdleHandler(async (threadId: string, entry: SessionEntry) => {
     if (!channel?.isThread()) return;
     const thread = channel as ThreadChannel;
 
-    let resultText = "";
+    const { resultText } = await drainStream(
+      query({
+        prompt: TEARDOWN_PROMPT,
+        options: {
+          cwd: PROJECT_ROOT,
+          permissionMode: "default",
+          resume: entry.sessionId,
+        },
+      }),
+    );
 
-    const stream = query({
-      prompt: TEARDOWN_PROMPT,
-      options: {
-        cwd: PROJECT_ROOT,
-        permissionMode: "default",
-        resume: entry.sessionId,
-      },
-    });
-
-    for await (const message of stream) {
-      if (message.type === "result" && message.subtype === "success") {
-        resultText = message.result;
-      }
-    }
-
-    if (resultText) {
-      const chunks = splitMessage(resultText);
-      for (const chunk of chunks) {
-        await thread.send(chunk);
-      }
-    }
+    if (resultText) await sendChunks(thread, resultText);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log("SESSION_ERROR", threadId, msg);
+    log("SESSION_ERROR", threadId, errMsg(err));
   }
 
   sessions.markInactive(threadId);
@@ -215,19 +271,19 @@ const client = new Client({
   ],
 });
 
-// Serialize messages per thread — one at a time
 const messageQueues = new Map<string, Promise<void>>();
 
-function enqueue(threadId: string, fn: () => Promise<void>) {
-  const prev = messageQueues.get(threadId) ?? Promise.resolve();
-  const next = prev.then(fn, fn);
-  messageQueues.set(threadId, next);
+function enqueue(id: string, fn: () => Promise<void>) {
+  const prev = messageQueues.get(id) ?? Promise.resolve();
+  const next = prev.then(fn, fn).finally(() => {
+    if (messageQueues.get(id) === next) messageQueues.delete(id);
+  });
+  messageQueues.set(id, next);
 }
 
 // --- MessageCreate handler ---
 
 client.on("messageCreate", async (message) => {
-  // Ignore bots (including self)
   if (message.author.bot) return;
 
   if (message.channel.isThread()) {
@@ -236,127 +292,38 @@ client.on("messageCreate", async (message) => {
 
     enqueue(threadId, async () => {
       const entry = sessions.get(threadId);
-
       if (entry) {
-        // Existing session — send to it
         await sendToSession(threadId, message.content, thread);
       } else {
-        // New session in an existing thread — create one
         const parent = thread.parent;
-        const channelName = parent?.name ?? "unknown";
-        const channelDescription =
-          (parent && "topic" in parent ? (parent.topic ?? "") : "") || "";
-
-        log("SESSION_START", threadId, channelName);
-
-        try {
-          let resultText = "";
-          let sessionId = "";
-
-          const stream = query({
-            prompt: message.content,
-            options: {
-              cwd: PROJECT_ROOT,
-              permissionMode: "default",
-              systemPrompt: {
-                type: "preset" as const,
-                preset: "claude_code" as const,
-                append: sessionPrompt(
-                  channelName,
-                  channelDescription,
-                  thread.name,
-                ),
-              },
-            },
-          });
-
-          for await (const msg of stream) {
-            if (msg.type === "result") {
-              sessionId = msg.session_id;
-              if (msg.subtype === "success") {
-                resultText = msg.result;
-              } else {
-                resultText =
-                  msg.errors?.join("\n") || "Session ended with an error.";
-              }
-            }
-          }
-
-          sessions.register(threadId, sessionId, channelName, channelDescription);
-
-          if (resultText) {
-            const chunks = splitMessage(resultText);
-            for (const chunk of chunks) {
-              await thread.send(chunk);
-            }
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log("SESSION_ERROR", threadId, msg);
-          await thread.send(`Error: ${msg}`).catch(console.error);
-        }
+        await startSession({
+          prompt: message.content,
+          channelName: parent?.name ?? "unknown",
+          channelDescription: channelTopic(parent),
+          thread,
+        });
       }
     });
   } else {
-    // Top-level channel message — create a thread
-    const threadName = message.content.slice(0, 90);
-    const channelName = "name" in message.channel ? (message.channel.name ?? "unknown") : "unknown";
-    const channelDescription =
-      "topic" in message.channel ? (message.channel.topic ?? "") : "";
+    const channel = message.channel as TextChannel;
+    activeChannels.add(channel.id);
 
     enqueue(message.id, async () => {
       await message.react("🔄").catch(console.error);
-
       try {
         const thread = await message.startThread({
-          name: threadName,
+          name: message.content.slice(0, 90) || `Session ${new Date().toISOString().slice(0, 16)}`,
           autoArchiveDuration: 1440,
         });
-        const threadId = thread.id;
-
-        log("SESSION_START", threadId, channelName);
-
-        let resultText = "";
-        let sessionId = "";
-
-        const stream = query({
+        await startSession({
           prompt: message.content,
-          options: {
-            cwd: PROJECT_ROOT,
-            permissionMode: "default",
-            systemPrompt: {
-              type: "preset" as const,
-              preset: "claude_code" as const,
-              append: sessionPrompt(channelName, channelDescription, thread.name),
-            },
-          },
+          channelName: channel.name,
+          channelDescription: channelTopic(channel),
+          thread,
         });
-
-        for await (const msg of stream) {
-          if (msg.type === "result") {
-            sessionId = msg.session_id;
-            if (msg.subtype === "success") {
-              resultText = msg.result;
-            } else {
-              resultText =
-                msg.errors?.join("\n") || "Session ended with an error.";
-            }
-          }
-        }
-
-        sessions.register(threadId, sessionId, channelName, channelDescription);
-
-        if (resultText) {
-          const chunks = splitMessage(resultText);
-          for (const chunk of chunks) {
-            await thread.send(chunk);
-          }
-        }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log("SESSION_ERROR", message.id, msg);
+        log("SESSION_ERROR", message.id, errMsg(err));
       }
-
       await message.reactions
         .resolve("🔄")
         ?.users.remove(client.user?.id)
@@ -365,107 +332,70 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-// --- Channel sweep (every 5 minutes) ---
+// --- Channel sweep ---
 
 async function sweep() {
   log("SWEEP_START", "*");
 
   for (const guild of client.guilds.cache.values()) {
+    // Fetch active threads once per guild (single API call)
+    let guildActiveThreads: ReadonlyMap<string, ThreadChannel> | undefined;
+    try {
+      const fetched = await guild.channels.fetchActiveThreads();
+      guildActiveThreads = fetched.threads as ReadonlyMap<string, ThreadChannel>;
+    } catch {
+      // no permission
+    }
+
     const channels = guild.channels.cache.filter(
       (ch) => ch.type === ChannelType.GuildText,
     );
 
-    for (const [, channel] of channels) {
+    for (const [channelId, channel] of channels) {
+      // Skip channels with no recent activity since last sweep
+      if (!activeChannels.has(channelId)) continue;
+
       const textChannel = channel as TextChannel;
-      let messages: Message[];
+      let messages;
       try {
-        const fetched = await textChannel.messages.fetch({ limit: 50 });
-        messages = [...fetched.values()];
-      } catch {
-        continue; // no permission or other issue
-      }
-
-      const channelName = textChannel.name;
-      const channelDescription = textChannel.topic ?? "";
-
-      for (const msg of messages) {
-        // Skip bot messages
-        if (msg.author.bot) continue;
-        // Skip messages that already have a thread
-        if (msg.hasThread) continue;
-        // Skip messages older than 30 minutes (don't resurrect ancient messages)
-        if (Date.now() - msg.createdTimestamp > 30 * 60_000) continue;
-
-        log("SWEEP_FOUND", msg.id, `#${channelName}: "${msg.content.slice(0, 60)}"`);
-
-        // Create thread and start session
-        const threadName = msg.content.slice(0, 90) || `Session ${new Date().toISOString().slice(0, 16)}`;
-
-        enqueue(msg.id, async () => {
-          try {
-            const thread = await msg.startThread({
-              name: threadName,
-              autoArchiveDuration: 1440,
-            });
-            const threadId = thread.id;
-            log("SESSION_START", threadId, `${channelName} (sweep)`);
-
-            busyThreads.add(threadId);
-            try {
-              let resultText = "";
-              let sessionId = "";
-
-              const stream = query({
-                prompt: msg.content,
-                options: {
-                  cwd: PROJECT_ROOT,
-                  permissionMode: "default",
-                  systemPrompt: {
-                    type: "preset" as const,
-                    preset: "claude_code" as const,
-                    append: sessionPrompt(channelName, channelDescription, thread.name),
-                  },
-                },
-              });
-
-              for await (const m of stream) {
-                if (m.type === "result") {
-                  sessionId = m.session_id;
-                  resultText = m.subtype === "success"
-                    ? m.result
-                    : (m.errors?.join("\n") || "Session ended with an error.");
-                }
-              }
-
-              sessions.register(threadId, sessionId, channelName, channelDescription);
-
-              if (resultText) {
-                for (const chunk of splitMessage(resultText)) {
-                  await thread.send(chunk);
-                }
-              }
-            } finally {
-              busyThreads.delete(threadId);
-            }
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            log("SESSION_ERROR", msg.id, errMsg);
-          }
-        });
-      }
-
-      // Check active threads for in-progress work — post status updates
-      let activeThreads;
-      try {
-        activeThreads = await textChannel.threads.fetchActive();
+        messages = await textChannel.messages.fetch({ limit: 50 });
       } catch {
         continue;
       }
 
-      for (const [threadId, thread] of activeThreads.threads) {
-        if (!busyThreads.has(threadId)) continue;
+      const channelName = textChannel.name;
+      const channelDescription = channelTopic(textChannel);
 
-        // This thread has a query in flight — post a status update
+      for (const [, msg] of messages) {
+        if (msg.author.bot) continue;
+        if (msg.hasThread) continue;
+        if (Date.now() - msg.createdTimestamp > 30 * 60_000) continue;
+
+        log("SWEEP_FOUND", msg.id, `#${channelName}: "${msg.content.slice(0, 60)}"`);
+
+        enqueue(msg.id, async () => {
+          try {
+            const thread = await msg.startThread({
+              name: msg.content.slice(0, 90) || `Session ${new Date().toISOString().slice(0, 16)}`,
+              autoArchiveDuration: 1440,
+            });
+            await startSession({
+              prompt: msg.content,
+              channelName,
+              channelDescription,
+              thread,
+            });
+          } catch (err) {
+            log("SESSION_ERROR", msg.id, errMsg(err));
+          }
+        });
+      }
+    }
+
+    // Post progress updates on busy threads
+    if (guildActiveThreads) {
+      for (const [threadId, thread] of guildActiveThreads) {
+        if (!busyThreads.has(threadId)) continue;
         const entry = sessions.get(threadId);
         if (!entry) continue;
 
@@ -478,6 +408,7 @@ async function sweep() {
     }
   }
 
+  activeChannels.clear();
   log("SWEEP_DONE", "*");
 }
 
@@ -501,6 +432,5 @@ process.on("SIGTERM", shutdown);
 await client.login(DISCORD_TOKEN);
 console.log(`claude-relay online as ${client.user?.tag}`);
 
-// Start periodic channel sweep
 sweepTimer = setInterval(() => sweep().catch(console.error), SWEEP_INTERVAL);
 console.log(`Channel sweep every ${SWEEP_INTERVAL / 1000}s`);
