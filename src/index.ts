@@ -17,7 +17,8 @@ const IDLE_TIMEOUT = Number(process.env.RELAY_IDLE_TIMEOUT) || 3_600_000;
 const CHECKPOINT_INTERVAL = Number(process.env.RELAY_CHECKPOINT_INTERVAL) || 10;
 const NOTES_DIR = process.env.RELAY_NOTES_DIR ?? "relay-notes";
 const SESSIONS_FILE =
-  process.env.RELAY_SESSIONS_FILE ?? join(PROJECT_ROOT, "relay-sessions.json");
+  process.env.RELAY_SESSIONS_FILE ??
+  join(new URL("..", import.meta.url).pathname, "relay-sessions.json");
 
 // --- Prompt templates ---
 
@@ -36,18 +37,17 @@ function sessionPrompt(
   ].join("\n");
 }
 
-const CHECKPOINT_PROMPT = [
-  "CHECKPOINT: Before continuing, briefly summarize what you've accomplished",
-  "in this session so far and what the current state of the work is.",
-  "Write this summary to your notes directory so it persists across sessions.",
-].join(" ");
+const CHECKPOINT_PROMPT = `[CHECKPOINT] Review your current state:
+- What tasks did you start that aren't finished?
+- Any changes you made that should be reverted or cleaned up?
+- Any files left in a dirty state?
+- Is your current work still aligned with what the user originally asked?
+List anything outstanding, then continue.`;
 
-const TEARDOWN_PROMPT = [
-  "SESSION ENDING: This session is being torn down due to inactivity.",
-  "Write a final summary of all work done, current state, any open issues,",
-  "and suggested next steps to your notes directory.",
-  "This is your last chance to persist context before the session ends.",
-].join(" ");
+const TEARDOWN_PROMPT = `[SESSION ENDING] This session is going idle. Before shutdown:
+- Summarize what was accomplished
+- Flag anything left incomplete
+- Write notable findings to ${NOTES_DIR}/`;
 
 // --- Logging ---
 
