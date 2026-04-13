@@ -14,13 +14,161 @@ import {
 
 // --- Helpers ---
 
+const CURSOR = " \u258D";
+const MIN_EDIT_INTERVAL = 1_000;
+const MAX_EDIT_INTERVAL = 10_000;
+
+/** Retry a Discord API call once on rate-limit or 5xx. */
+async function discordRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err: unknown) {
+    const code = (err as { httpStatus?: number }).httpStatus
+      ?? (err as { status?: number }).status;
+    if (code === 429 || (typeof code === "number" && code >= 500)) {
+      await new Promise((r) => setTimeout(r, 3_000));
+      return fn();
+    }
+    throw err;
+  }
+}
+
+/** Send a message, falling back to plain send if reply fails with 50035. */
+async function safeSend(
+  thread: ThreadChannel,
+  text: string,
+  replyTo?: Message,
+): Promise<Message> {
+  if (replyTo) {
+    try {
+      return await discordRetry(() => replyTo.reply(text));
+    } catch (err: unknown) {
+      const code = (err as { code?: number }).code;
+      if (code === 50035) {
+        // "Cannot reply to a system message" — fall through to plain send
+      } else {
+        throw err;
+      }
+    }
+  }
+  return discordRetry(() => thread.send(text));
+}
+
+/**
+ * Stream a Claude Code session to Discord with progressive message editing.
+ *
+ * Shows a live progress indicator while Claude works (tool summaries),
+ * then progressively sends the final result.
+ */
+async function streamToDiscord(
+  stream: ReturnType<typeof query>,
+  thread: ThreadChannel,
+  replyTo?: Message,
+): Promise<{ sessionId: string; resultText: string }> {
+  let sessionId = "";
+  let resultText = "";
+  let progressMsg: Message | null = null;
+  let lastEditTime = 0;
+  let editInterval = MIN_EDIT_INTERVAL;
+  let toolName = "";
+
+  for await (const message of stream) {
+    switch (message.type) {
+      case "assistant": {
+        // Extract tool names from content blocks for progress display
+        const content = message.message?.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === "tool_use") {
+              toolName = block.name as string;
+            }
+          }
+        }
+        break;
+      }
+
+      case "tool_use_summary": {
+        const now = Date.now();
+        if (now - lastEditTime >= editInterval) {
+          const statusText = `_Working..._ ${toolName ? `(${toolName})` : ""}${CURSOR}`;
+          try {
+            if (!progressMsg) {
+              progressMsg = await safeSend(thread, statusText, replyTo);
+              // Don't reply to subsequent messages
+              replyTo = undefined;
+            } else {
+              await discordRetry(() => progressMsg!.edit(statusText));
+            }
+            lastEditTime = now;
+            editInterval = MIN_EDIT_INTERVAL;
+          } catch {
+            // Rate limited on edit — back off
+            editInterval = Math.min(editInterval * 2, MAX_EDIT_INTERVAL);
+          }
+        }
+        break;
+      }
+
+      case "tool_progress": {
+        if (message.tool_name) toolName = message.tool_name;
+        break;
+      }
+
+      case "result": {
+        sessionId = message.session_id;
+        if (message.subtype === "success") {
+          resultText = message.result;
+        } else {
+          resultText = message.errors?.join("\n") || "Session ended with an error.";
+        }
+        break;
+      }
+    }
+  }
+
+  // Clean up progress message and send final result
+  if (progressMsg && resultText) {
+    // Try to edit progress message into start of result
+    const chunks = splitMessage(resultText);
+    try {
+      await discordRetry(() => progressMsg!.edit(chunks[0]));
+    } catch {
+      // Edit failed — delete progress and send fresh
+      await progressMsg.delete().catch(() => {});
+      await safeSend(thread, chunks[0], replyTo);
+    }
+    // Send remaining chunks
+    for (let i = 1; i < chunks.length; i++) {
+      await discordRetry(() => thread.send(chunks[i]));
+    }
+  } else if (progressMsg && !resultText) {
+    // No result — remove the progress message
+    await progressMsg.delete().catch(() => {});
+  } else if (!progressMsg && resultText) {
+    // Never showed progress — just send the result
+    const chunks = splitMessage(resultText);
+    for (let i = 0; i < chunks.length; i++) {
+      if (i === 0) {
+        await safeSend(thread, chunks[i], replyTo);
+      } else {
+        await discordRetry(() => thread.send(chunks[i]));
+      }
+    }
+  }
+
+  return { sessionId, resultText };
+}
+
+/**
+ * Send result text without streaming (for teardown / simple cases).
+ */
 async function sendChunks(thread: ThreadChannel, text: string, replyTo?: Message) {
   const chunks = splitMessage(text);
   for (let i = 0; i < chunks.length; i++) {
-    if (i === 0 && replyTo) {
-      await replyTo.reply(chunks[i]).catch(() => thread.send(chunks[i]));
+    if (i === 0) {
+      await safeSend(thread, chunks[i], replyTo);
     } else {
-      await thread.send(chunks[i]);
+      await discordRetry(() => thread.send(chunks[i]));
     }
   }
 }
@@ -83,7 +231,7 @@ export async function startSession(
   const typingTimer = startTyping(opts.thread);
   busyThreads.add(threadId);
   try {
-    const { resultText, sessionId } = await drainStream(
+    const { sessionId, resultText } = await streamToDiscord(
       query({
         prompt: opts.prompt,
         options: {
@@ -101,10 +249,11 @@ export async function startSession(
           },
         },
       }),
+      opts.thread,
+      opts.replyTo,
     );
 
     sessions.register(threadId, sessionId, opts.channelName, opts.channelDescription);
-    if (resultText) await sendChunks(opts.thread, resultText, opts.replyTo);
     return true;
   } catch (err) {
     log("SESSION_ERROR", threadId, errMsg(err));
@@ -145,7 +294,7 @@ export async function sendToSession(
   const typingTimer = startTyping(thread);
   busyThreads.add(threadId);
   try {
-    const { resultText, sessionId } = await drainStream(
+    const { sessionId } = await streamToDiscord(
       query({
         prompt: effectivePrompt,
         options: {
@@ -167,10 +316,11 @@ export async function sendToSession(
               }),
         },
       }),
+      thread,
+      replyTo,
     );
 
     sessions.updateSessionId(threadId, sessionId);
-    if (resultText) await sendChunks(thread, resultText, replyTo);
     return true;
   } catch (err) {
     log("SESSION_ERROR", threadId, errMsg(err));
