@@ -40,7 +40,7 @@ async function drainStream(
 function queryOptions(config: Config, channelConfig: ChannelConfig) {
   return {
     cwd: channelConfig.cwd ?? config.cwd,
-    permissionMode: channelConfig.permissionMode ?? ("default" as const),
+    permissionMode: channelConfig.permissionMode ?? ("auto" as const),
     ...(channelConfig.allowedTools && { allowedTools: channelConfig.allowedTools }),
     ...(channelConfig.additionalDirectories?.length && {
       additionalDirectories: channelConfig.additionalDirectories,
