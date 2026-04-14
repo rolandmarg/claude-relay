@@ -1,7 +1,7 @@
 import { Client, GatewayIntentBits } from "discord.js";
 import { initHaiku } from "./haiku.js";
 import { logDobby, logDobbyMetrics } from "./log.js";
-import { onDobbyMessage } from "./watcher.js";
+import { onDobbyThreadCreate } from "./watcher.js";
 
 export interface StartDobbyOptions {
   token?: string;
@@ -33,12 +33,12 @@ export async function startDobby(opts: StartDobbyOptions): Promise<{
     ],
   });
 
-  client.on("messageCreate", async (message) => {
+  client.on("threadCreate", async (thread) => {
     try {
-      await onDobbyMessage(message, opts.relayBotId, client.user?.id ?? "");
+      await onDobbyThreadCreate(thread, opts.relayBotId, client.user?.id ?? "");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logDobby("DISCORD_ERROR", message.channel.id, `onDobbyMessage error: ${msg}`);
+      logDobby("DISCORD_ERROR", thread.id, `onDobbyThreadCreate error: ${msg}`);
     }
   });
 

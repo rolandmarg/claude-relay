@@ -28,8 +28,8 @@ export function cleanTitle(raw: string): string | null {
 
   if (!title) return null;
 
-  if (title.length > 80) {
-    title = `${title.slice(0, 77)}...`;
+  if (title.length > 40) {
+    title = `${title.slice(0, 37)}...`;
   }
 
   return title;

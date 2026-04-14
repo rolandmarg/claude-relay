@@ -39,3 +39,10 @@ test("extractFirstUserMessage skips Dobby's own messages", () => {
   ];
   expect(extractFirstUserMessage(messages, RELAY_BOT_ID, dobbyId)).toBe("real user message");
 });
+
+test("extractFirstUserMessage uses the starter user message even without relay replies", () => {
+  const messages = [
+    { author: { bot: false, id: "user123" }, content: "top 3 presets" },
+  ];
+  expect(extractFirstUserMessage(messages, RELAY_BOT_ID)).toBe("top 3 presets");
+});

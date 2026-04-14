@@ -25,15 +25,15 @@ test("strips trailing period", () => {
   expect(cleanTitle("Model Query.")).toBe("Model Query");
 });
 
-test("truncates to 80 chars with ellipsis", () => {
+test("truncates to 40 chars with ellipsis", () => {
   const long = "word ".repeat(20);
   const result = cleanTitle(long);
-  expect(result?.length).toBe(80);
+  expect(result?.length).toBe(40);
   expect(result?.endsWith("...")).toBe(true);
 });
 
-test("does not truncate at exactly 80 chars", () => {
-  const exact = "a".repeat(80);
+test("does not truncate at exactly 40 chars", () => {
+  const exact = "a".repeat(40);
   expect(cleanTitle(exact)).toBe(exact);
 });
 

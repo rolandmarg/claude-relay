@@ -1,4 +1,4 @@
-import type { Message, ThreadChannel } from "discord.js";
+import type { ThreadChannel } from "discord.js";
 import { generateTitle } from "./haiku.js";
 import { incrementDobby, logDobby } from "./log.js";
 
@@ -57,16 +57,11 @@ export async function autoTitle(
   }
 }
 
-export async function onDobbyMessage(
-  message: Message,
+export async function onDobbyThreadCreate(
+  thread: ThreadChannel,
   relayBotId: string,
   selfId: string,
 ): Promise<void> {
-  if (message.author.id !== relayBotId) return;
-
-  const thread = message.channel;
-  if (!thread.isThread()) return;
-
   const threadId = thread.id;
   if (titledThreads.has(threadId)) return;
 
