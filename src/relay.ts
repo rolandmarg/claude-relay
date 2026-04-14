@@ -10,7 +10,6 @@ import {
   errMsg,
   sessionPrompt,
   checkpointPrompt,
-  teardownPrompt,
 } from "./prompts.js";
 
 // --- Helpers ---
@@ -337,32 +336,11 @@ export async function sendToSession(
 export function setupIdleHandler(
   config: Config,
   sessions: SessionManager,
-  getClient: () => { channels: { fetch(id: string): Promise<unknown> } },
 ) {
+  void config;
   sessions.setIdleHandler(async (threadId: string, entry: SessionEntry) => {
     log("SESSION_TEARDOWN", threadId);
-    const channelConfig = resolveChannelConfig(config, entry.channelName);
-
-    try {
-      const channel = await getClient().channels.fetch(threadId);
-      if (!channel || !(channel as { isThread?: () => boolean }).isThread?.()) return;
-      const thread = channel as ThreadChannel;
-
-      const { resultText } = await drainStream(
-        query({
-          prompt: teardownPrompt(config.notesDir),
-          options: {
-            ...queryOptions(config, channelConfig),
-            resume: entry.sessionId,
-          },
-        }),
-      );
-
-      if (resultText) await sendChunks(thread, resultText);
-    } catch (err) {
-      log("SESSION_ERROR", threadId, errMsg(err));
-    }
-
+    void entry;
     sessions.markInactive(threadId);
   });
 }

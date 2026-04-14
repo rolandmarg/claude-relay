@@ -31,7 +31,7 @@ const client = new Client({
   ],
 });
 
-setupIdleHandler(config, sessions, () => client);
+setupIdleHandler(config, sessions);
 
 // --- Ack emoji helpers ---
 
