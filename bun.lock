@@ -6,6 +6,7 @@
       "name": "claude-relay",
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "latest",
+        "@anthropic-ai/sdk": "^0.81.0",
         "discord.js": "^14.18.0",
       },
     },

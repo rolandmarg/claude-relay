@@ -3,3 +3,4 @@ dist/
 relay-sessions.json
 relay-notes/
 .env
+relay-channels.json

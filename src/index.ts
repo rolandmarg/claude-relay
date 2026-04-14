@@ -1,7 +1,9 @@
 import { Client, GatewayIntentBits, type Message, type TextChannel, type ThreadChannel } from "discord.js";
 import { loadConfig } from "./config.js";
+import { startDobby } from "./dobby/runtime.js";
 import { SessionManager } from "./sessions.js";
 import { channelTopic, errMsg, log } from "./prompts.js";
+import { sanitizeName } from "./sanitize.js";
 import {
   startSession,
   sendToSession,
@@ -99,7 +101,7 @@ client.on("messageCreate", async (message) => {
       let success = false;
       try {
         const thread = await message.startThread({
-          name: message.content.slice(0, 90) || `Session ${new Date().toISOString().slice(0, 16)}`,
+          name: sanitizeName(message.content),
           autoArchiveDuration: 1440,
         });
         success = await startSession(config, sessions, {
@@ -150,6 +152,7 @@ async function shutdown() {
   }
 
   await sessions.save();
+  dobby?.shutdown();
   client.destroy();
   process.exit(0);
 }
@@ -162,3 +165,9 @@ process.on("SIGTERM", shutdown);
 await client.login(config.discordToken);
 console.log(`claude-relay online as ${client.user?.tag}`);
 console.log(`Channel sweep every ${config.sweepInterval / 1000}s`);
+
+const dobby = await startDobby({
+  token: config.dobbyDiscordToken,
+  anthropicApiKey: config.anthropicApiKey,
+  relayBotId: client.user?.id ?? "",
+});

@@ -5,9 +5,37 @@ Discord ↔ Claude Code session bridge. Each Discord thread becomes an independe
 ## Setup
 
 1. `bun install`
-2. Set `DISCORD_TOKEN` environment variable (or use SOPS: `sops exec-env secrets.env 'bun run start'`)
+2. Create encrypted `secrets.env` with SOPS+age
 3. Optionally create `relay-channels.json` for per-channel config (see below)
-4. `bun run start`
+4. Optionally add Dobby env vars for in-process thread management
+5. `bun run start`
+
+### Secrets
+
+`bun run start` and `bun run dev` load secrets through SOPS:
+
+```bash
+sops exec-env secrets.env 'bun run src/index.ts'
+```
+
+Create or rotate the encrypted env file without leaving plaintext on disk:
+
+```bash
+printf 'DISCORD_TOKEN=%s\n' "$DISCORD_TOKEN" \
+  | sops encrypt --filename-override secrets.env \
+      --input-type dotenv --output-type dotenv /dev/stdin \
+  > secrets.env
+```
+
+If you want Dobby running inside the same `claude-relay` process, include these
+env vars in `secrets.env` too:
+
+```dotenv
+DOBBY_DISCORD_TOKEN=...
+ANTHROPIC_API_KEY=...
+```
+
+If you need to run with plaintext env vars temporarily, use `bun run start:plain`.
 
 ## How it works
 
@@ -25,6 +53,8 @@ Discord ↔ Claude Code session bridge. Each Discord thread becomes an independe
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DISCORD_TOKEN` | Yes | — | Discord bot token |
+| `DOBBY_DISCORD_TOKEN` | No | — | Optional Dobby bot token for in-process thread housekeeping |
+| `ANTHROPIC_API_KEY` | No | — | Required only if `DOBBY_DISCORD_TOKEN` is set |
 | `RELAY_CWD` | No | `process.cwd()` | Default working directory for sessions |
 | `RELAY_IDLE_TIMEOUT` | No | `3600000` | Session idle timeout in ms (default: 1 hour) |
 | `RELAY_CHECKPOINT_INTERVAL` | No | `10` | Turns between checkpoint injections |

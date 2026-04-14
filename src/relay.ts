@@ -4,6 +4,7 @@ import type { SessionManager, SessionEntry } from "./sessions.js";
 import type { Config, ChannelConfig } from "./config.js";
 import { resolveChannelConfig } from "./config.js";
 import { splitMessage } from "./split.js";
+import { sanitizeName } from "./sanitize.js";
 import {
   log,
   errMsg,
@@ -412,7 +413,7 @@ export async function sweep(
         enqueue(msg.id, async () => {
           try {
             const thread = await msg.startThread({
-              name: msg.content.slice(0, 90) || `Session ${new Date().toISOString().slice(0, 16)}`,
+              name: sanitizeName(msg.content),
               autoArchiveDuration: 1440,
             });
             await startSession(config, sessions, {

@@ -17,6 +17,8 @@ interface ChannelConfigFile {
 
 export interface Config {
   discordToken: string;
+  dobbyDiscordToken?: string;
+  anthropicApiKey?: string;
   cwd: string;
   idleTimeout: number;
   checkpointInterval: number;
@@ -70,6 +72,8 @@ export async function loadConfig(): Promise<Config> {
 
   return {
     discordToken,
+    dobbyDiscordToken: process.env.DOBBY_DISCORD_TOKEN,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     cwd,
     idleTimeout: Number(process.env.RELAY_IDLE_TIMEOUT) || 3_600_000,
     checkpointInterval: Number(process.env.RELAY_CHECKPOINT_INTERVAL) || 10,
